@@ -1,0 +1,372 @@
+Docker-----------------------------------
+FROM golang:1.24-alpine AS builder
+
+# Build argument to specify which service to build
+ARG SERVICE_NAME=user-management
+
+# Install git and ca-certificates (needed for fetching dependencies)
+RUN apk add --no-cache git ca-certificates
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the specified service
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/${SERVICE_NAME}
+
+# Final stage
+FROM alpine:latest
+
+# Build args for port configuration
+ARG SERVICE_NAME=user-management
+ARG SERVICE_PORT=8080
+
+# Install ca-certificates and curl for HTTPS requests and health checks
+RUN apk --no-cache add ca-certificates curl
+
+WORKDIR /root/
+
+# Copy the binary from builder stage
+COPY --from=builder /app/main .
+
+# Copy config files
+COPY --from=builder /app/configs ./configs
+
+# Expose the service-specific port
+EXPOSE ${SERVICE_PORT}
+
+# Set environment variables
+ENV GIN_MODE=release
+ENV CONFIG_PATH=./configs
+ENV PORT=${SERVICE_PORT}
+
+# Service-specific health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:${SERVICE_PORT}/health || exit 1
+
+# Run the application
+CMD ["./main"]
+
+
+Makefile-------------------------------------------------------------------------------------------------
+.PHONY: help build test run clean docker-build docker-run migrate seed dev lint fmt deps swagger swagger-init swagger-gen
+
+# Variables
+APP_NAME=user-management-service
+DOCKER_IMAGE=aa-core/$(APP_NAME)
+DOCKER_TAG=latest
+PORT=8080
+
+# Default target
+help:
+	@echo "Available commands:"
+	@echo "  build           - Build the application"
+	@echo "  build-all       - Build all services"
+	@echo "  run             - Run user management service"
+	@echo "  run-all         - Run all services concurrently"
+	@echo "  run-auth        - Run auth service"
+	@echo "  run-payment     - Run payment service"
+	@echo "  run-vehicle     - Run vehicle service"
+	@echo "  run-valuation   - Run valuation service"
+	@echo "  test            - Run tests"
+	@echo "  swagger-init    - Initialize swagger in the project"
+	@echo "  swagger-gen     - Generate swagger documentation"
+	@echo "  swagger-serve   - Serve swagger documentation"
+	@echo "  docker-dev      - Start development environment"
+	@echo "  clean           - Clean build artifacts"
+
+# Install swagger dependencies
+swagger-init:
+	@echo "🔧 Installing Swagger dependencies..."
+	go install github.com/swaggo/swag/cmd/swag@latest
+	go mod tidy
+
+# Generate swagger documentation for all services
+swagger-gen: swagger-init
+	@echo "📚 Generating Swagger documentation for all services..."
+	@echo "📖 Generating Auth Service docs..."
+	@if [ -d "./cmd/auth-service" ]; then \
+		cd ./cmd/auth-service && swag init -g main.go -o ../../docs/auth-service --parseDependency --parseInternal; \
+	fi
+	@echo "📖 Generating User Management docs..."
+	@if [ -d "./cmd/user-management" ]; then \
+		cd ./cmd/user-management && swag init -g main.go -o ../../docs/user-management --parseDependency --parseInternal; \
+	fi
+	@echo "📖 Generating Payment Service docs..."
+	@if [ -d "./cmd/payment-service" ]; then \
+		cd ./cmd/payment-service && swag init -g main.go -o ../../docs/payment-service --parseDependency --parseInternal; \
+	fi
+	@echo "📖 Generating Vehicle Service docs..."
+	@if [ -d "./cmd/vehicle-service" ]; then \
+		cd ./cmd/vehicle-service && swag init -g main.go -o ../../docs/vehicle-service --parseDependency --parseInternal; \
+	fi
+	@echo "📖 Generating Valuation Service docs..."
+	@if [ -d "./cmd/valuation-service" ]; then \
+		cd ./cmd/valuation-service && swag init -g main.go -o ../../docs/valuation-service --parseDependency --parseInternal; \
+	fi
+	@echo "✅ All Swagger documentation generated successfully!"
+	@echo "📁 Documentation files are available in the docs/ directory"
+
+# Generate swagger documentation for valuation service only
+swagger-gen-valuation: swagger-init
+	@echo "📚 Generating Swagger documentation for Valuation Service..."
+	@if [ -d "./cmd/valuation-service" ]; then \
+		cd ./cmd/valuation-service && swag init -g main.go -o ../../docs/valuation-service --parseDependency --parseInternal; \
+		echo "✅ Valuation Service Swagger documentation generated!"; \
+		echo "📁 Files available in docs/valuation-service/"; \
+	else \
+		echo "❌ Valuation service directory not found"; \
+	fi
+
+# Serve swagger documentation (requires a simple HTTP server)
+swagger-serve:
+	@echo "🌐 Starting Swagger documentation server..."
+	@if command -v python3 > /dev/null; then \
+		echo "📖 Swagger docs available at:"; \
+		echo "   Auth Service: http://localhost:8000/auth-service/"; \
+		echo "   User Management: http://localhost:8000/user-management/"; \
+		echo "   Payment Service: http://localhost:8000/payment-service/"; \
+		echo "   Vehicle Service: http://localhost:8000/vehicle-service/"; \
+		echo "   Valuation Service: http://localhost:8000/valuation-service/"; \
+		echo "Press Ctrl+C to stop the server"; \
+		cd docs && python3 -m http.server 8000; \
+	elif command -v python > /dev/null; then \
+		echo "📖 Swagger docs available at:"; \
+		echo "   Auth Service: http://localhost:8000/auth-service/"; \
+		echo "   User Management: http://localhost:8000/user-management/"; \
+		echo "   Payment Service: http://localhost:8000/payment-service/"; \
+		echo "   Vehicle Service: http://localhost:8000/vehicle-service/"; \
+		echo "   Valuation Service: http://localhost:8000/valuation-service/"; \
+		echo "Press Ctrl+C to stop the server"; \
+		cd docs && python -m SimpleHTTPServer 8000; \
+	else \
+		echo "❌ Python not found. Please install Python to serve documentation."; \
+		echo "💡 Alternatively, you can open docs/[service-name]/index.html in your browser"; \
+	fi
+
+# Build auth service
+build-auth:
+	@echo "Building auth service..."
+	go build -o bin/auth-service ./cmd/auth-service
+
+# Run auth service
+run-auth:
+	@echo "Starting auth service on port 8083..."
+	AUTH_SERVICE_PORT=8083 go run ./cmd/auth-service
+
+# Test auth service
+test-auth:
+	@echo "Testing auth service..."
+	go test ./internal/auth-service/... -v
+
+# Run valuation service
+run-valuation:
+	@echo "Starting valuation service on port 8084..."
+	VALUATION_SERVICE_PORT=8084 go run ./cmd/valuation-service
+
+# Test valuation service
+test-valuation:
+	@echo "Testing valuation service..."
+	go test ./internal/valuation-service/... -v
+
+# Build valuation service
+build-valuation:
+	@echo "Building valuation service..."
+	go build -o bin/valuation-service ./cmd/valuation-service
+
+# Build user management
+build:
+	@echo "Building $(APP_NAME)..."
+	go build -o bin/$(APP_NAME) ./cmd/user-management
+
+# Build payment service
+build-payment:
+	@echo "Building payment service..."
+	go build -o bin/payment-service ./cmd/payment-service
+
+# Build vehicle service
+build-vehicle:
+	@echo "Building vehicle service..."
+	go build -o bin/vehicle-service ./cmd/vehicle-service
+
+# Build all services
+build-all: build build-auth build-payment build-vehicle build-valuation
+	@echo "All services built successfully!"
+
+# Run user management service
+run:
+	@echo "Starting $(APP_NAME) on port $(PORT)..."
+	go run ./cmd/user-management
+
+# Run payment service
+run-payment:
+	@echo "Starting payment service on port 8081..."
+	PAYMENT_SERVICE_URL=http://localhost:8081 go run ./cmd/payment-service
+
+# Run vehicle service
+run-vehicle:
+	@echo "Starting vehicle service on port 8082..."
+	VEHICLE_SERVICE_URL=http://localhost:8082 go run ./cmd/vehicle-service
+
+# Run all services with proper startup order
+run-all:
+	@echo "🚀 Starting all services..."
+	@bash -c ' \
+		cleanup() { \
+			echo ""; \
+			echo "🛑 Shutting down all services..."; \
+			[ ! -z "$$USER_PID" ] && kill $$USER_PID 2>/dev/null && echo "📊 User Management stopped ✅"; \
+			[ ! -z "$$AUTH_PID" ] && kill $$AUTH_PID 2>/dev/null && echo "🔐 Auth Service stopped ✅"; \
+			[ ! -z "$$VALUATION_PID" ] && kill $$VALUATION_PID 2>/dev/null && echo "🧮 Valuation Service stopped ✅"; \
+			[ ! -z "$$PAYMENT_PID" ] && kill $$PAYMENT_PID 2>/dev/null && echo "💳 Payment Service stopped ✅"; \
+			[ ! -z "$$VEHICLE_PID" ] && kill $$VEHICLE_PID 2>/dev/null && echo "🚗 Vehicle Service stopped ✅"; \
+			echo "🏁 All services stopped successfully"; \
+			exit 0; \
+		}; \
+		trap cleanup INT TERM; \
+		echo "🔐 Starting Auth Service..."; \
+		AUTH_SERVICE_PORT=8083 go run ./cmd/auth-service & \
+		AUTH_PID=$$!; \
+		sleep 3; \
+		echo "📊 Starting User Management Service..."; \
+		go run ./cmd/user-management & \
+		USER_PID=$$!; \
+		sleep 2; \
+		echo "💳 Starting Payment Service..."; \
+		PAYMENT_SERVICE_URL=http://localhost:8081 go run ./cmd/payment-service & \
+		PAYMENT_PID=$$!; \
+		echo "🧮 Starting Valuation Service..."; \
+		VALUATION_SERVICE_URL=http://localhost:8084 go run ./cmd/valuation-service & \
+		VALUATION_PID=$$!; \
+		echo "🚗 Starting Vehicle Service..."; \
+		VEHICLE_SERVICE_URL=http://localhost:8082 go run ./cmd/vehicle-service & \
+		VEHICLE_PID=$$!; \
+		echo ""; \
+		echo "✅ All services running:"; \
+		echo "→ 🔐 Auth Service (PID: $$AUTH_PID) http://localhost:8083"; \
+		echo "→ 📊 User Management (PID: $$USER_PID) http://localhost:8080"; \
+		echo "→ 💳 Payment Service (PID: $$PAYMENT_PID) http://localhost:8081"; \
+		echo "→ 🚗 Vehicle Service (PID: $$VEHICLE_PID) http://localhost:8082"; \
+		echo "→ 🧮 Valuation Service (PID: $$VALUATION_PID) http://localhost:8084"; \
+		echo ""; \
+		echo "🛑 Press Ctrl+C to stop all services"; \
+		echo ""; \
+		wait; \
+	'
+
+# Service status check
+status:
+	@echo "🔍 Service Status:"
+	@if lsof -i :8080 >/dev/null 2>&1; then \
+		echo "📊 User Management: Running (port 8080) ✅"; \
+	else \
+		echo "📊 User Management: Not running ❌"; \
+	fi
+	@if lsof -i :8083 >/dev/null 2>&1; then \
+		echo "🔐 Auth Service: Running (port 8083) ✅"; \
+	else \
+		echo "🔐 Auth Service: Not running ❌"; \
+	fi
+	@if lsof -i :8081 >/dev/null 2>&1; then \
+		echo "💳 Payment Service: Running (port 8081) ✅"; \
+	else \
+		echo "💳 Payment Service: Not running ❌"; \
+	fi
+	@if lsof -i :8082 >/dev/null 2>&1; then \
+		echo "🚗 Vehicle Service: Running (port 8082) ✅"; \
+	else \
+		echo "🚗 Vehicle Service: Not running ❌"; \
+	fi
+	@if lsof -i :8084 >/dev/null 2>&1; then \
+		echo "🧮 Valuation Service: Running (port 8084) ✅"; \
+	else \
+		echo "🧮 Valuation Service: Not running ❌"; \
+	fi
+
+# Generate service token for testing
+generate-token:
+	@echo "🔑 Generating service token for payment-service..."
+	@curl -s -X POST http://localhost:8083/generate-service-token \
+		-H "Content-Type: application/json" \
+		-d '{"service_id": "payment-service", "version": "1.0"}' | \
+		jq -r '.data.service_token' || echo "❌ Failed to generate token (is auth service running?)"
+
+# Test auth service endpoints
+test-auth-endpoints:
+	@echo "🧪 Testing auth service endpoints..."
+	@echo "Health check:"
+	@curl -s http://localhost:8083/health | jq . || echo "❌ Auth service not responding"
+
+# Kill all services
+kill-all:
+	@echo "🚨 Force killing all services..."
+	@pkill -f "go run ./cmd/user-management" 2>/dev/null || echo "📊 User Management: Not running"
+	@pkill -f "go run ./cmd/auth-service" 2>/dev/null || echo "🔐 Auth Service: Not running"
+	@pkill -f "go run ./cmd/payment-service" 2>/dev/null || echo "💳 Payment Service: Not running"
+	@pkill -f "go run ./cmd/vehicle-service" 2>/dev/null || echo "🚗 Vehicle Service: Not running"
+	@pkill -f "go run ./cmd/valuation-service" 2>/dev/null || echo "🧮 Valuation Service: Not running"
+	@echo "✅ Cleanup complete"
+
+# Install dependencies
+deps:
+	@echo "📦 Installing dependencies..."
+	go mod download
+	go mod tidy
+
+# Format code
+fmt:
+	@echo "🎨 Formatting code..."
+	go fmt ./...
+
+# Lint code
+lint:
+	@echo "🔍 Linting code..."
+	@if command -v golangci-lint > /dev/null; then \
+		golangci-lint run; \
+	else \
+		echo "Installing golangci-lint..."; \
+		go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest; \
+		golangci-lint run; \
+	fi
+
+# Run tests
+test:
+	@echo "🧪 Running tests..."
+	go test ./... -v -race -coverprofile=coverage.out
+	go tool cover -html=coverage.out -o coverage.html
+
+# Development with hot reload
+dev:
+	@echo "🔄 Starting development server with hot reload..."
+	@if command -v air > /dev/null; then \
+		air; \
+	else \
+		echo "Installing air..."; \
+		go install github.com/cosmtrek/air@latest; \
+		air; \
+	fi
+
+# Clean build artifacts
+clean:
+	@echo "🧹 Cleaning build artifacts..."
+	rm -rf bin/
+	rm -rf docs/
+	rm -f coverage.out coverage.html
+	docker system prune -f
+
+# Docker development
+docker-dev:
+	@echo "🐳 Starting development environment..."
+	docker compose -f docker-compose.dev.yml up -d
+
+docker-dev-down:
+	@echo "🐳 Stopping development environment..."
+	docker compose -f docker-compose.dev.yml down
